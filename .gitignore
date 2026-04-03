@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+.DS_Store
+bmrb_data_cache/unfiltered_assignment_level_dataset/bmrb_shift_table_full.csv

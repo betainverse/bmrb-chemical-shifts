@@ -78,13 +78,16 @@ Extracts Plotly histogram data from a BMRB `_ss.html` page.
 Compact local cache derived from the published filtered BMRB histogram pages.
 Each row stores one parsed histogram trace plus the serialized shift values for
 that trace.
+The raw filtered HTML cache used to build this file is kept locally but is not
+versioned in git.
 
 `ss_histogram_cache_compact.csv`
 (`chem_shifts/bmrb_data_cache/ss_histogram_cache_compact.csv`)
 
 Compact local cache derived from the published secondary-structure BMRB
 histogram pages. Each row stores one parsed secondary-structure trace plus the
-serialized shift values for that trace.
+serialized shift values for that trace. The raw SS HTML cache used to build this
+file is kept locally but is not versioned in git.
 
 `bmrb_shift_table_full.csv`
 (`chem_shifts/bmrb_data_cache/unfiltered_assignment_level_dataset/bmrb_shift_table_full.csv`)

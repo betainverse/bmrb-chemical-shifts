@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .DS_Store
 bmrb_data_cache/unfiltered_assignment_level_dataset/bmrb_shift_table_full.csv
+bmrb_data_cache/bmrb_histogram_pages_filtered_full/
+bmrb_data_cache/bmrb_histogram_pages_ss_only/

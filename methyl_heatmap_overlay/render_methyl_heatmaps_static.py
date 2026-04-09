@@ -30,7 +30,7 @@ Expected output data:
 Relationship to other workflows:
 - this is the production companion to the exploratory script in
   `chem_shifts/methyl_heatmap_exploration/`
-- it reuses the residue-pairing helpers from `render_methyl_heatmaps_html.py`
+- it is intentionally standalone and does not depend on the HTML renderer
 - unlike the exploratory script, it renders one polished default figure rather
   than a parameter sweep
 
@@ -47,7 +47,11 @@ Command-line use:
 from __future__ import annotations
 
 import argparse
+import csv
+from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
+from statistics import mean
 
 import matplotlib
 
@@ -72,17 +76,109 @@ DEFAULT_THRESHOLD_VALUE = 0.02
 # if you want the stronger minimum-count look that was the runner-up in the
 # exploratory comparisons.
 DEFAULT_CONTOUR_LEVELS = [0.15, 0.30, 0.50, 0.70]
+GLOBAL_X_RANGE = [-0.5, 3.0]
+GLOBAL_Y_RANGE = [8.0, 30.0]
 
-from render_methyl_heatmaps_html import (
-    GLOBAL_X_RANGE,
-    GLOBAL_Y_RANGE,
-    SPECS,
-    TYPE_COLORS,
-    build_density_grid,
-    build_residue_atom_values,
-    extract_points,
-    read_shift_rows,
-    trim_outliers,
+TYPE_COLORS = {
+    "ala-hb-cb": "#e11d48",
+    "ile-hd1-cd1": "#0f766e",
+    "ile-hg2-cg2": "#65a30d",
+    "leu-hd-cd": "#8b5cf6",
+    "val-hg-cg": "#2563eb",
+    "met-he-ce": "#c026d3",
+    "thr-hg2-cg2": "#c2410c",
+}
+
+RESIDUE_KEY_FIELDS = (
+    "bmrb_id",
+    "entity_id",
+    "entity_assembly_id",
+    "comp_index_id",
+    "assigned_chem_shift_list_id",
+    "residue_3",
+)
+
+
+@dataclass(frozen=True)
+class PairVariant:
+    label: str
+    proton_atoms: tuple[str, ...]
+    carbon_atoms: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class HeatmapSpec:
+    slug: str
+    title: str
+    residue: str
+    x_label: str
+    y_label: str
+    variants: tuple[PairVariant, ...]
+
+
+SPECS = (
+    HeatmapSpec(
+        slug="ala-hb-cb",
+        title="Alanine HB/CB",
+        residue="ALA",
+        x_label="HB / MB (ppm)",
+        y_label="CB (ppm)",
+        variants=(PairVariant("ALA HB-CB", ("HB1", "HB2", "HB3"), ("CB",)),),
+    ),
+    HeatmapSpec(
+        slug="ile-hd1-cd1",
+        title="Isoleucine HD1/CD1",
+        residue="ILE",
+        x_label="HD1 (ppm)",
+        y_label="CD1 (ppm)",
+        variants=(PairVariant("ILE HD1-CD1", ("HD11", "HD12", "HD13"), ("CD1",)),),
+    ),
+    HeatmapSpec(
+        slug="ile-hg2-cg2",
+        title="Isoleucine HG2/CG2",
+        residue="ILE",
+        x_label="HG2 (ppm)",
+        y_label="CG2 (ppm)",
+        variants=(PairVariant("ILE HG2-CG2", ("HG21", "HG22", "HG23"), ("CG2",)),),
+    ),
+    HeatmapSpec(
+        slug="val-hg-cg",
+        title="Valine HG/CG",
+        residue="VAL",
+        x_label="HG (ppm)",
+        y_label="CG (ppm)",
+        variants=(
+            PairVariant("VAL HG1-CG1", ("HG11", "HG12", "HG13"), ("CG1",)),
+            PairVariant("VAL HG2-CG2", ("HG21", "HG22", "HG23"), ("CG2",)),
+        ),
+    ),
+    HeatmapSpec(
+        slug="leu-hd-cd",
+        title="Leucine HD/CD",
+        residue="LEU",
+        x_label="HD (ppm)",
+        y_label="CD (ppm)",
+        variants=(
+            PairVariant("LEU HD1-CD1", ("HD11", "HD12", "HD13"), ("CD1",)),
+            PairVariant("LEU HD2-CD2", ("HD21", "HD22", "HD23"), ("CD2",)),
+        ),
+    ),
+    HeatmapSpec(
+        slug="met-he-ce",
+        title="Methionine HE/CE",
+        residue="MET",
+        x_label="HE / ME (ppm)",
+        y_label="CE (ppm)",
+        variants=(PairVariant("MET HE-CE", ("HE1", "HE2", "HE3"), ("CE",)),),
+    ),
+    HeatmapSpec(
+        slug="thr-hg2-cg2",
+        title="Threonine HG2/CG2",
+        residue="THR",
+        x_label="HG2 (ppm)",
+        y_label="CG2 (ppm)",
+        variants=(PairVariant("THR HG2-CG2", ("HG21", "HG22", "HG23"), ("CG2",)),),
+    ),
 )
 
 
@@ -98,6 +194,109 @@ plt.rcParams.update(
         "ytick.color": "#334155",
     }
 )
+
+
+# Read the assignment-level shift CSV into row dictionaries for local
+# methyl-heatmap processing.
+#
+# Input data shape:
+# - `path`: CSV file containing assignment-level BMRB chemical shift rows
+#
+# Output data shape:
+# - list of `dict[str, str]`, one dictionary per CSV row
+def read_shift_rows(path: Path) -> list[dict[str, str]]:
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+# Group assignment-level shift rows by residue instance and atom name so methyl
+# proton/carbon pairs can be reconstructed.
+#
+# Input data shape:
+# - `rows`: assignment-level CSV rows with residue identity, atom names, and
+#   numeric `shift_ppm` values stored as text
+#
+# Output data shape:
+# - nested dictionary keyed first by residue identity tuple and then by atom
+#   name, where each atom entry stores a list of float shift values
+def build_residue_atom_values(rows: list[dict[str, str]]) -> dict[tuple[str, ...], dict[str, list[float]]]:
+    grouped: dict[tuple[str, ...], dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    for row in rows:
+        atom = row["atom"].upper()
+        residue = row["residue_3"].upper()
+        if residue not in {"ALA", "ILE", "LEU", "VAL", "MET", "THR"}:
+            continue
+        if not atom.startswith(("H", "C")):
+            continue
+        try:
+            shift = float(row["shift_ppm"])
+        except ValueError:
+            continue
+        key = tuple(row[field] for field in RESIDUE_KEY_FIELDS)
+        grouped[key][atom].append(shift)
+    return grouped
+
+
+# Convert grouped residue-level atom values into paired methyl proton/carbon
+# points for one heatmap specification.
+#
+# Input data shape:
+# - `grouped`: residue-level nested atom-value dictionary
+# - `spec`: one HeatmapSpec describing which residue and atom variants to pair
+#
+# Output data shape:
+# - list of `(proton_shift_ppm, carbon_shift_ppm, variant_label)` tuples
+def extract_points(
+    grouped: dict[tuple[str, ...], dict[str, list[float]]],
+    spec: HeatmapSpec,
+) -> list[tuple[float, float, str]]:
+    points: list[tuple[float, float, str]] = []
+    for residue_key, atom_map in grouped.items():
+        if residue_key[-1] != spec.residue:
+            continue
+        for variant in spec.variants:
+            proton_values = [value for atom in variant.proton_atoms for value in atom_map.get(atom, [])]
+            carbon_values = [value for atom in variant.carbon_atoms for value in atom_map.get(atom, [])]
+            if proton_values and carbon_values:
+                points.append((mean(proton_values), mean(carbon_values), variant.label))
+    return points
+
+
+# Remove extreme paired points symmetrically from both axes before heatmap
+# binning so a small number of outliers do not dominate the display.
+#
+# Input data shape:
+# - `points`: list of paired methyl proton/carbon tuples
+# - `percentile`: percentage to trim from each tail of both axes
+#
+# Output data shape:
+# - filtered list of paired methyl proton/carbon tuples
+def trim_outliers(points: list[tuple[float, float, str]], percentile: float = 0.5) -> list[tuple[float, float, str]]:
+    xs = np.array([x for x, _, _ in points], dtype=float)
+    ys = np.array([y for _, y, _ in points], dtype=float)
+    x_low, x_high = np.percentile(xs, [percentile, 100.0 - percentile])
+    y_low, y_high = np.percentile(ys, [percentile, 100.0 - percentile])
+    return [(x, y, label) for x, y, label in points if x_low <= x <= x_high and y_low <= y <= y_high]
+
+
+# Bin paired methyl proton/carbon points into a 2D histogram grid for heatmap
+# rendering.
+#
+# Input data shape:
+# - `points`: list of paired methyl proton/carbon tuples
+# - `bins`: integer bin count applied along both axes
+#
+# Output data shape:
+# - tuple of x centers, y centers, and transposed 2D histogram counts
+def build_density_grid(points: list[tuple[float, float, str]], bins: int = 160) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    xs = np.array([x for x, _, _ in points], dtype=float)
+    ys = np.array([y for _, y, _ in points], dtype=float)
+    x_edges = np.linspace(GLOBAL_X_RANGE[0], GLOBAL_X_RANGE[1], bins + 1)
+    y_edges = np.linspace(GLOBAL_Y_RANGE[0], GLOBAL_Y_RANGE[1], bins + 1)
+    hist, _, _ = np.histogram2d(xs, ys, bins=[x_edges, y_edges])
+    x_centers = (x_edges[:-1] + x_edges[1:]) / 2.0
+    y_centers = (y_edges[:-1] + y_edges[1:]) / 2.0
+    return x_centers, y_centers, hist.T
 
 
 # Convert one methyl-class density grid into a tinted RGBA image for imshow.
